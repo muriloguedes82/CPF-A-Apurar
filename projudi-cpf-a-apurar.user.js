@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      1.0.0
+// @version      1.0.1
 // @description  Abre vários processos do Projudi/TJPR em abas simultâneas, entra na aba "Partes e Outros", localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
 // @author       muriloguedes1982
 // @match        *://projudi.tjpr.jus.br/projudi/*
 // @match        *://*.tjpr.jus.br/projudi/*
-// @run-at       document-end
+// @run-at       document-idle
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
@@ -304,6 +304,19 @@
   function initControllerUI() {
     if (document.getElementById('cpfrun-panel')) return;
 
+    // Projudi pode servir uma página antiga baseada em <frameset>, onde
+    // document.body nem sempre existe/está pronto no mesmo instante em que
+    // outras páginas normais estariam. Em vez de falhar silenciosamente,
+    // tentamos de novo por alguns segundos.
+    const mountPoint = document.body || document.documentElement;
+    if (!mountPoint) {
+      log('painel: DOM ainda não está pronto, tentando novamente em 500ms...');
+      setTimeout(initControllerUI, 500);
+      return;
+    }
+
+    log('painel: montando painel de controle em', mountPoint.tagName);
+
     const style = document.createElement('style');
     style.textContent = `
       #cpfrun-panel { position: fixed; right: 16px; bottom: 16px; width: 340px; max-height: 80vh;
@@ -328,7 +341,7 @@
       .tag-alerta{background:#c0392b} .tag-naoenc{background:#8e7b1f} .tag-erro{background:#7a1d1d}
       #cpfrun-panel .minbtn{background:transparent;color:#fff;font-size:14px;padding:0 4px;}
     `;
-    document.head.appendChild(style);
+    (document.head || document.documentElement).appendChild(style);
 
     const panel = document.createElement('div');
     panel.id = 'cpfrun-panel';
@@ -351,7 +364,8 @@
         <ul id="cpfrun-status"></ul>
       </div>
     `;
-    document.body.appendChild(panel);
+    mountPoint.appendChild(panel);
+    log('painel: painel de controle adicionado com sucesso.');
 
     // arrastar o painel
     (function makeDraggable() {
@@ -586,12 +600,18 @@
 
   // ======================= INICIALIZAÇÃO ======================= //
 
+  log('script carregado em', location.href, '| topo?', window.top === window);
+
   const fromUrl = readAssignmentFromUrl();
 
   if (window.top === window && !fromUrl) {
     // aba "normal" (não foi aberta pelo script para processar um processo):
     // monta o painel de controle.
-    initControllerUI();
+    try {
+      initControllerUI();
+    } catch (e) {
+      log('ERRO ao montar o painel de controle:', e);
+    }
   }
 
   if (fromUrl) {
