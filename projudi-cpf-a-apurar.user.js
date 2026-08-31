@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      1.0.2
+// @version      1.0.3
 // @description  Abre vários processos do Projudi/TJPR em abas simultâneas, entra na aba "Partes e Outros", localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
 // @author       muriloguedes1982
 // @match        *://*.tjpr.jus.br/*
@@ -309,11 +309,17 @@
   function initControllerUI() {
     if (document.getElementById('cpfrun-panel')) return;
 
-    // Projudi pode servir uma página antiga baseada em <frameset>, onde
-    // document.body nem sempre existe/está pronto no mesmo instante em que
-    // outras páginas normais estariam. Em vez de falhar silenciosamente,
-    // tentamos de novo por alguns segundos.
-    const mountPoint = document.body || document.documentElement;
+    // Projudi serve uma página antiga baseada em <frameset>. Nesse caso,
+    // document.body (por spec) aponta para o próprio elemento <frameset>,
+    // e elementos "extras" anexados dentro dele normalmente NÃO são
+    // renderizados pelo navegador (o frameset só sabe desenhar frame/
+    // frameset/noframes). Por isso, quando body for um frameset, montamos
+    // o painel direto em document.documentElement (a tag <html>), que
+    // renderiza normalmente um elemento com position:fixed por cima de tudo.
+    let mountPoint = document.body;
+    if (!mountPoint || mountPoint.tagName === 'FRAMESET') {
+      mountPoint = document.documentElement;
+    }
     if (!mountPoint) {
       log('painel: DOM ainda não está pronto, tentando novamente em 500ms...');
       setTimeout(initControllerUI, 500);
