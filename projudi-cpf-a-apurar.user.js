@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      3.0.0
+// @version      3.1.0
 // @description  Percorre vários processos do Projudi/TJPR, um de cada vez, na mesma aba: entra na aba "Partes e Outros", localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
 // @author       muriloguedes1982
 // @match        *://*.tjpr.jus.br/*
@@ -47,15 +47,20 @@
  *   #informacoesProcessuais). Se o TJPR atualizar o layout do sistema, pode
  *   ser necessário ajustar as constantes no topo do bloco "CONFIGURAÇÃO"
  *   abaixo.
- * - O Projudi é montado com frames/iframes aninhados (às vezes em um
- *   subdomínio diferente, como projudi2.tjpr.jus.br, e o formulário de
- *   busca pode morar num frame que demora a carregar, tipo
- *   usuario/mesaAnalista.do). Este script roda em TODAS as janelas/frames
- *   da página e usa o armazenamento do Tampermonkey (GM_setValue/
+ * - O Projudi é montado com frames/iframes aninhados (topo em
+ *   projudi.tjpr.jus.br > frame "área de atuação" em projudi2.tjpr.jus.br
+ *   > iframe "userMainFrame" com a "mesa" e o formulário de busca, mesma
+ *   origem do frame pai). Este script roda em TODAS as janelas/frames da
+ *   página e usa o armazenamento do Tampermonkey (GM_setValue/
  *   GM_addValueChangeListener) para a janela de topo avisar qual processo
- *   deve ser pesquisado agora e para o frame que encontrar o resultado
- *   avisar de volta - isso funciona instantaneamente em qualquer frame,
- *   não importa a origem/subdomínio ou quando ele carregar.
+ *   deve ser pesquisado agora e para quem encontrar o resultado avisar de
+ *   volta - isso funciona instantaneamente em qualquer frame, não importa
+ *   a origem/subdomínio ou quando ele carregar. Além disso, sempre que
+ *   consegue rodar em algum frame, o script também tenta agir diretamente
+ *   em qualquer <iframe>/<frame> filho de MESMA ORIGEM (via
+ *   contentDocument) - isso cobre o caso em que o Tampermonkey não
+ *   conseguiu (ou demorou a) injetar um script separado num frame filho
+ *   específico.
  * - Processamento é SEQUENCIAL (um processo por vez, na mesma aba) para não
  *   sobrecarregar/derrubar a sessão no servidor do TJPR como acontecia ao
  *   abrir várias abas simultâneas.
@@ -123,10 +128,6 @@
   const GM_KEY_RESULT = 'cpfrun_result';
 
   let currentTask = null; // { processo, seq }
-  let lastReportedSeq = null;
-  let acted = false; // já clicamos em algo para a tarefa atual? evita clicar de novo enquanto aguarda navegação/carregamento
-  let actedForSeq = null;
-  let lastLoggedSignature = null;
 
   function adoptTask(t) {
     if (!t || !t.seq) return;
@@ -166,19 +167,33 @@
     GM_setValue(GM_KEY_RESULT, JSON.stringify(payload));
   }
 
-  function currentPageProcesso() {
-    const el = document.querySelector(SEL_HEADER_TITULO);
+  // Estado de progresso é rastreado POR DOCUMENTO (não globalmente), porque
+  // um único script instanciado num frame pode alcançar e mexer em vários
+  // documentos de mesma origem (o seu próprio + filhos same-origin, veja
+  // tryAdvanceRecursive). Cada documento tem seu próprio "quanto já avancei".
+  const docState = new WeakMap();
+  function getDocState(doc) {
+    let st = docState.get(doc);
+    if (!st) {
+      st = { acted: false, actedForSeq: null, lastReportedSeq: null, lastLoggedSignature: null };
+      docState.set(doc, st);
+    }
+    return st;
+  }
+
+  function currentPageProcesso(doc) {
+    const el = doc.querySelector(SEL_HEADER_TITULO);
     if (!el) return null;
     const digits = (el.textContent || '').replace(/\D/g, '');
     return digits || null;
   }
 
-  async function buildScreenshot() {
+  async function buildScreenshot(doc) {
     const opts = { backgroundColor: '#ffffff', useCORS: true, allowTaint: true, scale: 1.3, logging: false };
     const canvases = [];
-    const headerTitulo = document.querySelector(SEL_HEADER_TITULO);
-    const headerInfo = document.querySelector(SEL_HEADER_INFO_TABLE);
-    const partes = document.querySelector(SEL_INCLUDE_CONTENT);
+    const headerTitulo = doc.querySelector(SEL_HEADER_TITULO);
+    const headerInfo = doc.querySelector(SEL_HEADER_INFO_TABLE);
+    const partes = doc.querySelector(SEL_INCLUDE_CONTENT);
 
     if (headerTitulo) canvases.push(await html2canvas(headerTitulo, opts));
     if (headerInfo) canvases.push(await html2canvas(headerInfo, opts));
@@ -205,8 +220,8 @@
     return combined.toDataURL('image/jpeg', 0.82);
   }
 
-  async function extractAndReport(task) {
-    const tables = Array.from(document.querySelectorAll(SEL_RESULT_TABLES));
+  async function extractAndReport(doc, task) {
+    const tables = Array.from(doc.querySelectorAll(SEL_RESULT_TABLES));
     let foundRow = null;
     let foundTable = null;
 
@@ -250,7 +265,7 @@
 
     let imageDataUrl = null;
     try {
-      imageDataUrl = await buildScreenshot();
+      imageDataUrl = await buildScreenshot(doc);
     } catch (e) {
       log('erro ao gerar screenshot', e);
     }
@@ -265,41 +280,42 @@
     reportResult(task, { status: 'ALERTA_SEM_CPF', imageDataUrl });
   }
 
-  async function tryAdvance() {
+  async function tryAdvanceOn(doc) {
     if (!currentTask) return;
-    if (lastReportedSeq === currentTask.seq) return; // já tratamos esta tarefa nesta página
+    const st = getDocState(doc);
+    if (st.lastReportedSeq === currentTask.seq) return; // já tratamos esta tarefa neste documento
 
-    // uma tarefa nova chegou nesta mesma página (documento não navegou) -
-    // libera a trava de "já cliquei" para poder agir de novo.
-    if (acted && actedForSeq !== currentTask.seq) {
-      acted = false;
+    // uma tarefa nova chegou neste mesmo documento (não navegou) - libera a
+    // trava de "já cliquei" para poder agir de novo.
+    if (st.acted && st.actedForSeq !== currentTask.seq) {
+      st.acted = false;
     }
 
-    const pageProcesso = currentPageProcesso();
+    const pageProcesso = currentPageProcesso(doc);
     const processoCorreto = pageProcesso === currentTask.processo;
 
-    const includeContent = document.querySelector(SEL_INCLUDE_CONTENT);
+    const includeContent = doc.querySelector(SEL_INCLUDE_CONTENT);
     const partesCarregadas = includeContent && includeContent.querySelector('table.resultTable');
 
-    // log de diagnóstico toda vez que o "retrato" desta página muda,
+    // log de diagnóstico toda vez que o "retrato" deste documento muda,
     // para acompanhar a navegação sem inundar o console a cada 500ms.
     const signature = [
-      location.href,
-      !!document.querySelector(SEL_MENU_BUSCA),
-      !!document.querySelector(SEL_NUM_PROCESSO),
+      doc.URL,
+      !!doc.querySelector(SEL_MENU_BUSCA),
+      !!doc.querySelector(SEL_NUM_PROCESSO),
       pageProcesso,
-      !!document.querySelector(SEL_TAB_PARTES),
+      !!doc.querySelector(SEL_TAB_PARTES),
       !!partesCarregadas,
     ].join('|');
-    if (signature !== lastLoggedSignature) {
-      lastLoggedSignature = signature;
+    if (signature !== st.lastLoggedSignature) {
+      st.lastLoggedSignature = signature;
       log('estado da página mudou ->', signature);
     }
 
     if (partesCarregadas && processoCorreto) {
-      lastReportedSeq = currentTask.seq;
+      st.lastReportedSeq = currentTask.seq;
       log('partes carregadas para', currentTask.processo, '- extraindo...');
-      await extractAndReport(currentTask);
+      await extractAndReport(doc, currentTask);
       return;
     }
 
@@ -307,13 +323,13 @@
     // não clica de novo, só espera (evita cliques repetidos a cada 500ms
     // enquanto a navegação/carregamento da página ainda está em curso,
     // que pode levar vários segundos no Projudi).
-    if (acted) return;
+    if (st.acted) return;
 
-    const tabLink = document.querySelector(SEL_TAB_PARTES);
+    const tabLink = doc.querySelector(SEL_TAB_PARTES);
     if (tabLink && processoCorreto) {
-      acted = true;
-      actedForSeq = currentTask.seq;
-      log('clicando em "Partes e Outros" para', currentTask.processo);
+      st.acted = true;
+      st.actedForSeq = currentTask.seq;
+      log('clicando em "Partes e Outros" para', currentTask.processo, '| doc:', doc.URL);
       tabLink.click();
       return;
     }
@@ -321,12 +337,12 @@
     // se a página mostra um processo diferente do atual (sobra da consulta
     // anterior) ou nenhum processo, não tenta extrair nem clicar na aba de
     // partes - precisa primeiro voltar para a busca.
-    const numField = document.querySelector(SEL_NUM_PROCESSO);
-    const btnPesquisar = document.querySelector(SEL_BTN_PESQUISAR);
+    const numField = doc.querySelector(SEL_NUM_PROCESSO);
+    const btnPesquisar = doc.querySelector(SEL_BTN_PESQUISAR);
     if (numField && btnPesquisar) {
-      acted = true;
-      actedForSeq = currentTask.seq;
-      log('preenchendo busca com', currentTask.processo);
+      st.acted = true;
+      st.actedForSeq = currentTask.seq;
+      log('preenchendo busca com', currentTask.processo, '| doc:', doc.URL);
       numField.value = currentTask.processo;
       numField.dispatchEvent(new Event('input', { bubbles: true }));
       numField.dispatchEvent(new Event('change', { bubbles: true }));
@@ -335,19 +351,53 @@
       return;
     }
 
-    const buscaMenu = document.querySelector(SEL_MENU_BUSCA);
+    const buscaMenu = doc.querySelector(SEL_MENU_BUSCA);
     if (buscaMenu && !processoCorreto) {
-      acted = true;
-      actedForSeq = currentTask.seq;
-      log('clicando no menu de busca de processo');
+      st.acted = true;
+      st.actedForSeq = currentTask.seq;
+      log('clicando no menu de busca de processo | doc:', doc.URL);
       buscaMenu.click();
       return;
     }
   }
 
+  // Tenta agir no documento deste frame E, recursivamente, em qualquer
+  // <iframe>/<frame> filho que seja da MESMA ORIGEM (contentDocument
+  // acessível sem erro de cross-origin) - assim, um único frame em que o
+  // Tampermonkey conseguiu injetar o script consegue alcançar e operar
+  // frames filhos de mesma origem mesmo que o Tampermonkey não tenha
+  // (ou ainda não tenha) injetado um script separado ali dentro. Frames
+  // filhos de origem DIFERENTE precisam ter o próprio script injetado
+  // neles (o que também acontece na maioria das vezes) para se cuidarem
+  // sozinhos.
+  async function tryAdvanceRecursive(doc) {
+    try {
+      await tryAdvanceOn(doc);
+    } catch (e) {
+      log('erro no avanço de estado', e);
+    }
+    let frames;
+    try {
+      frames = doc.querySelectorAll('iframe, frame');
+    } catch (e) {
+      return;
+    }
+    for (const f of frames) {
+      let childDoc = null;
+      try {
+        childDoc = f.contentDocument;
+      } catch (e) {
+        childDoc = null;
+      }
+      if (childDoc) {
+        await tryAdvanceRecursive(childDoc);
+      }
+    }
+  }
+
   function startWorker() {
     setInterval(() => {
-      tryAdvance().catch((e) => log('erro no avanço de estado', e));
+      tryAdvanceRecursive(document);
     }, POLL_INTERVAL_MS);
   }
 
