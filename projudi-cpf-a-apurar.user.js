@@ -1,12 +1,15 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      2.2.0
+// @version      3.0.0
 // @description  Percorre vários processos do Projudi/TJPR, um de cada vez, na mesma aba: entra na aba "Partes e Outros", localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
 // @author       muriloguedes1982
 // @match        *://*.tjpr.jus.br/*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
 // @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // ==/UserScript==
@@ -45,11 +48,14 @@
  *   ser necessário ajustar as constantes no topo do bloco "CONFIGURAÇÃO"
  *   abaixo.
  * - O Projudi é montado com frames/iframes aninhados (às vezes em um
- *   subdomínio diferente, como projudi2.tjpr.jus.br). Este script roda em
- *   TODAS as janelas/frames da página e usa postMessage para a janela de
- *   topo avisar qual processo deve ser pesquisado agora e para o frame que
- *   encontrar o resultado avisar de volta - isso funciona mesmo entre
- *   frames de origens diferentes.
+ *   subdomínio diferente, como projudi2.tjpr.jus.br, e o formulário de
+ *   busca pode morar num frame que demora a carregar, tipo
+ *   usuario/mesaAnalista.do). Este script roda em TODAS as janelas/frames
+ *   da página e usa o armazenamento do Tampermonkey (GM_setValue/
+ *   GM_addValueChangeListener) para a janela de topo avisar qual processo
+ *   deve ser pesquisado agora e para o frame que encontrar o resultado
+ *   avisar de volta - isso funciona instantaneamente em qualquer frame,
+ *   não importa a origem/subdomínio ou quando ele carregar.
  * - Processamento é SEQUENCIAL (um processo por vez, na mesma aba) para não
  *   sobrecarregar/derrubar a sessão no servidor do TJPR como acontecia ao
  *   abrir várias abas simultâneas.
@@ -78,7 +84,6 @@
   const CPF_VAZIO_REGEX = /n[aã]o\s*cadastrado|^$/i;
 
   const TASK_TIMEOUT_MS = 90000; // tempo máximo por processo antes de desistir e ir para o próximo
-  const BROADCAST_INTERVAL_MS = 700; // intervalo de "aviso" entre frames sobre a tarefa atual
   const POLL_INTERVAL_MS = 500; // intervalo de checagem do estado da página em cada frame
 
   // ======================= UTILITÁRIOS ======================= //
@@ -102,13 +107,20 @@
   }
 
   // ======================= PARTE "TRABALHADOR" (roda em toda janela/frame) ======================= //
-  // A janela de topo mantém a fila de processos e, a cada momento, avisa
-  // (via postMessage) qual é o processo "da vez" para todos os frames da
-  // própria aba. Cada frame verifica o que existe no DOM e avança sozinho
-  // (clicar no menu de busca, preencher e pesquisar, clicar em "Partes e
-  // Outros", extrair o resultado) e reporta de volta para a janela de topo
-  // (também via postMessage) quando termina. Como tudo acontece na MESMA
-  // aba, não é preciso nenhum mecanismo de armazenamento entre abas.
+  // A janela de topo mantém a fila de processos e, a cada momento, grava
+  // (via GM_setValue) qual é o processo "da vez". Como o armazenamento do
+  // Tampermonkey NÃO é isolado por frame/origem (ao contrário de
+  // postMessage, que depende de alcançar o frame certo na árvore, algo que
+  // se mostrou frágil no Projudi - o formulário de busca mora num frame que
+  // demora a carregar, tipo usuario/mesaAnalista.do), TODOS os frames da
+  // aba enxergam o mesmo valor instantaneamente via
+  // GM_addValueChangeListener, não importa em qual frame/origem estejam.
+  // Cada frame verifica o que existe no DOM e avança sozinho (clicar no
+  // menu de busca, preencher e pesquisar, clicar em "Partes e Outros",
+  // extrair o resultado) e reporta o resultado de volta do mesmo jeito.
+
+  const GM_KEY_TASK = 'cpfrun_task';
+  const GM_KEY_RESULT = 'cpfrun_result';
 
   let currentTask = null; // { processo, seq }
   let lastReportedSeq = null;
@@ -116,53 +128,42 @@
   let actedForSeq = null;
   let lastLoggedSignature = null;
 
-  window.addEventListener('message', (ev) => {
-    const d = ev.data;
-    if (!d) return;
-    if (d.type === 'CPFRUN_TASK') {
-      if (!currentTask || currentTask.seq !== d.seq) {
-        currentTask = { processo: d.processo, seq: d.seq };
-        log('tarefa recebida:', d.processo, '(seq', d.seq + ') | URL desta página:', location.href);
-        log(
-          'diagnóstico desta página ->',
-          'processoBusca:', !!document.querySelector(SEL_MENU_BUSCA),
-          '| numeroProcesso:', !!document.querySelector(SEL_NUM_PROCESSO),
-          '| pesquisar:', !!document.querySelector(SEL_BTN_PESQUISAR),
-          '| abaPartes:', !!document.querySelector(SEL_TAB_PARTES),
-          '| includeContent:', !!document.querySelector(SEL_INCLUDE_CONTENT)
-        );
-      }
-    }
-  });
-
-  function broadcastTask(task, announce) {
-    let count = 0;
-    function bc(win) {
-      count++;
-      try {
-        win.postMessage({ type: 'CPFRUN_TASK', processo: task.processo, seq: task.seq }, '*');
-      } catch (e) {
-        /* ignore */
-      }
-      try {
-        for (let i = 0; i < win.frames.length; i++) bc(win.frames[i]);
-      } catch (e) {
-        /* frame cross-origin, ignore */
-      }
-    }
-    bc(window);
-    if (announce) {
-      log('tarefa', task.processo, '(seq', task.seq + ') anunciada para', count, 'janela(s)/frame(s) desta aba.');
+  function adoptTask(t) {
+    if (!t || !t.seq) return;
+    if (!currentTask || currentTask.seq !== t.seq) {
+      currentTask = t;
+      log('tarefa recebida:', t.processo, '(seq', t.seq + ') | URL desta página:', location.href);
+      log(
+        'diagnóstico desta página ->',
+        'processoBusca:', !!document.querySelector(SEL_MENU_BUSCA),
+        '| numeroProcesso:', !!document.querySelector(SEL_NUM_PROCESSO),
+        '| pesquisar:', !!document.querySelector(SEL_BTN_PESQUISAR),
+        '| abaPartes:', !!document.querySelector(SEL_TAB_PARTES),
+        '| includeContent:', !!document.querySelector(SEL_INCLUDE_CONTENT)
+      );
     }
   }
 
+  // pega a tarefa atual assim que este frame carrega (caso já exista uma
+  // tarefa em andamento quando este documento apareceu) ...
+  try {
+    const existing = GM_getValue(GM_KEY_TASK, null);
+    if (existing) adoptTask(JSON.parse(existing));
+  } catch (e) {
+    /* ignore */
+  }
+  // ... e continua ouvindo por novas tarefas a qualquer momento.
+  GM_addValueChangeListener(GM_KEY_TASK, (name, oldV, newV) => {
+    try {
+      adoptTask(JSON.parse(newV));
+    } catch (e) {
+      /* ignore */
+    }
+  });
+
   function reportResult(task, extra) {
     const payload = Object.assign({ processo: task.processo, seq: task.seq }, extra);
-    try {
-      window.top.postMessage({ type: 'CPFRUN_RESULT', ...payload }, '*');
-    } catch (e) {
-      log('erro ao reportar resultado', e);
-    }
+    GM_setValue(GM_KEY_RESULT, JSON.stringify(payload));
   }
 
   function currentPageProcesso() {
@@ -500,29 +501,23 @@
       const results = list.map((p) => ({ processo: p, status: 'PENDENTE' }));
       renderStatus(results);
 
+      const runId = Date.now() + '_' + Math.random().toString(36).slice(2, 8);
       let index = 0;
-      let seqCounter = 0;
+      let n = 0;
       let stopped = false;
       let allDone = false;
       let timeoutHandle = null;
-      let broadcastHandle = null;
-
-      function stopBroadcast() {
-        if (broadcastHandle) {
-          clearInterval(broadcastHandle);
-          broadcastHandle = null;
-        }
-      }
-
       let currentAssignedTask = null;
 
-      function onMessage(ev) {
-        const d = ev.data;
-        if (!d || d.type !== 'CPFRUN_RESULT') return;
-        if (!currentAssignedTask || d.seq !== currentAssignedTask.seq) return; // resultado de tarefa antiga, ignora
-        finishCurrent(d);
-      }
-      window.addEventListener('message', onMessage);
+      const resultListenerId = GM_addValueChangeListener(GM_KEY_RESULT, (name, oldV, newV) => {
+        try {
+          const d = JSON.parse(newV);
+          if (!currentAssignedTask || d.seq !== currentAssignedTask.seq) return; // resultado de tarefa antiga, ignora
+          finishCurrent(d);
+        } catch (e) {
+          log('erro ao interpretar resultado', e);
+        }
+      });
 
       function launchNext() {
         if (stopped) return;
@@ -535,13 +530,12 @@
         results[index].status = 'ANDAMENTO';
         renderStatus(results);
 
-        seqCounter++;
-        const task = { processo, seq: seqCounter };
+        n++;
+        const task = { processo, seq: runId + ':' + n };
         currentAssignedTask = task;
 
-        stopBroadcast();
-        broadcastTask(task, true);
-        broadcastHandle = setInterval(() => broadcastTask(task), BROADCAST_INTERVAL_MS);
+        GM_setValue(GM_KEY_TASK, JSON.stringify(task));
+        log('tarefa', task.processo, '(seq', task.seq + ') publicada.');
 
         timeoutHandle = setTimeout(() => {
           finishCurrent({ status: 'TIMEOUT', seq: task.seq });
@@ -554,7 +548,6 @@
           clearTimeout(timeoutHandle);
           timeoutHandle = null;
         }
-        stopBroadcast();
 
         results[index] = Object.assign(results[index], resultData);
         renderStatus(results);
@@ -567,7 +560,7 @@
 
       function finishAll() {
         allDone = true;
-        window.removeEventListener('message', onMessage);
+        GM_removeValueChangeListener(resultListenerId);
         log('sequência concluída.');
       }
 
@@ -581,8 +574,7 @@
         stop() {
           stopped = true;
           if (timeoutHandle) clearTimeout(timeoutHandle);
-          stopBroadcast();
-          window.removeEventListener('message', onMessage);
+          GM_removeValueChangeListener(resultListenerId);
         },
       };
     }
