@@ -1,11 +1,10 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      1.0.1
+// @version      1.0.2
 // @description  Abre vários processos do Projudi/TJPR em abas simultâneas, entra na aba "Partes e Outros", localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
 // @author       muriloguedes1982
-// @match        *://projudi.tjpr.jus.br/projudi/*
-// @match        *://*.tjpr.jus.br/projudi/*
+// @match        *://*.tjpr.jus.br/*
 // @run-at       document-idle
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -60,6 +59,12 @@
  * - Use com responsabilidade: abrir muitas abas ao mesmo tempo gera carga
  *   no servidor do TJPR. Prefira rodar em horários de menor uso e evite
  *   concorrências muito altas se perceber lentidão.
+ * - O TJPR passou a exibir o Projudi dentro de um portal (a barra com o
+ *   "PDPJ-Br"/"cabecalho-oid.jsp"), então a aba de verdade (topo da janela)
+ *   pode não estar mais em uma URL que contenha "/projudi/" - por isso o
+ *   @match cobre todo o domínio *.tjpr.jus.br, não só "/projudi/*". Isso é
+ *   necessário para que o painel de controle (que só é montado na janela de
+ *   topo) consiga aparecer.
  */
 
 (function () {
