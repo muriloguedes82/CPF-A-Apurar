@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      2.0.0
+// @version      2.1.0
 // @description  Percorre vários processos do Projudi/TJPR, um de cada vez, na mesma aba: entra na aba "Partes e Outros", localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
 // @author       muriloguedes1982
 // @match        *://*.tjpr.jus.br/*
@@ -112,6 +112,8 @@
 
   let currentTask = null; // { processo, seq }
   let lastReportedSeq = null;
+  let acted = false; // já clicamos em algo para a tarefa atual? evita clicar de novo enquanto aguarda navegação/carregamento
+  let actedForSeq = null;
 
   window.addEventListener('message', (ev) => {
     const d = ev.data;
@@ -119,6 +121,7 @@
     if (d.type === 'CPFRUN_TASK') {
       if (!currentTask || currentTask.seq !== d.seq) {
         currentTask = { processo: d.processo, seq: d.seq };
+        log('tarefa recebida:', d.processo, '(seq', d.seq + ')');
       }
     }
   });
@@ -251,6 +254,12 @@
     if (!currentTask) return;
     if (lastReportedSeq === currentTask.seq) return; // já tratamos esta tarefa nesta página
 
+    // uma tarefa nova chegou nesta mesma página (documento não navegou) -
+    // libera a trava de "já cliquei" para poder agir de novo.
+    if (acted && actedForSeq !== currentTask.seq) {
+      acted = false;
+    }
+
     const pageProcesso = currentPageProcesso();
     const processoCorreto = pageProcesso === currentTask.processo;
 
@@ -259,12 +268,22 @@
 
     if (partesCarregadas && processoCorreto) {
       lastReportedSeq = currentTask.seq;
+      log('partes carregadas para', currentTask.processo, '- extraindo...');
       await extractAndReport(currentTask);
       return;
     }
 
+    // Já clicamos em algo para esta tarefa e ainda não vimos o resultado -
+    // não clica de novo, só espera (evita cliques repetidos a cada 500ms
+    // enquanto a navegação/carregamento da página ainda está em curso,
+    // que pode levar vários segundos no Projudi).
+    if (acted) return;
+
     const tabLink = document.querySelector(SEL_TAB_PARTES);
     if (tabLink && processoCorreto) {
+      acted = true;
+      actedForSeq = currentTask.seq;
+      log('clicando em "Partes e Outros" para', currentTask.processo);
       tabLink.click();
       return;
     }
@@ -275,6 +294,9 @@
     const numField = document.querySelector(SEL_NUM_PROCESSO);
     const btnPesquisar = document.querySelector(SEL_BTN_PESQUISAR);
     if (numField && btnPesquisar) {
+      acted = true;
+      actedForSeq = currentTask.seq;
+      log('preenchendo busca com', currentTask.processo);
       numField.value = currentTask.processo;
       numField.dispatchEvent(new Event('input', { bubbles: true }));
       numField.dispatchEvent(new Event('change', { bubbles: true }));
@@ -285,6 +307,9 @@
 
     const buscaMenu = document.querySelector(SEL_MENU_BUSCA);
     if (buscaMenu && !processoCorreto) {
+      acted = true;
+      actedForSeq = currentTask.seq;
+      log('clicando no menu de busca de processo');
       buscaMenu.click();
       return;
     }
