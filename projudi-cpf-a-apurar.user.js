@@ -1,11 +1,15 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      3.1.0
+// @version      3.2.0
 // @description  Percorre vários processos do Projudi/TJPR, um de cada vez, na mesma aba: entra na aba "Partes e Outros", localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
 // @author       muriloguedes1982
 // @match        *://*.tjpr.jus.br/*
-// @run-at       document-idle
+// @match        *://projudi.tjpr.jus.br/*
+// @match        *://projudi2.tjpr.jus.br/*
+// @match        *://projudi3.tjpr.jus.br/*
+// @match        *://projudi4.tjpr.jus.br/*
+// @run-at       document-start
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addValueChangeListener
