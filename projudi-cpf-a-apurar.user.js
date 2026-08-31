@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      2.1.0
+// @version      2.2.0
 // @description  Percorre vários processos do Projudi/TJPR, um de cada vez, na mesma aba: entra na aba "Partes e Outros", localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
 // @author       muriloguedes1982
 // @match        *://*.tjpr.jus.br/*
@@ -114,6 +114,7 @@
   let lastReportedSeq = null;
   let acted = false; // já clicamos em algo para a tarefa atual? evita clicar de novo enquanto aguarda navegação/carregamento
   let actedForSeq = null;
+  let lastLoggedSignature = null;
 
   window.addEventListener('message', (ev) => {
     const d = ev.data;
@@ -121,13 +122,23 @@
     if (d.type === 'CPFRUN_TASK') {
       if (!currentTask || currentTask.seq !== d.seq) {
         currentTask = { processo: d.processo, seq: d.seq };
-        log('tarefa recebida:', d.processo, '(seq', d.seq + ')');
+        log('tarefa recebida:', d.processo, '(seq', d.seq + ') | URL desta página:', location.href);
+        log(
+          'diagnóstico desta página ->',
+          'processoBusca:', !!document.querySelector(SEL_MENU_BUSCA),
+          '| numeroProcesso:', !!document.querySelector(SEL_NUM_PROCESSO),
+          '| pesquisar:', !!document.querySelector(SEL_BTN_PESQUISAR),
+          '| abaPartes:', !!document.querySelector(SEL_TAB_PARTES),
+          '| includeContent:', !!document.querySelector(SEL_INCLUDE_CONTENT)
+        );
       }
     }
   });
 
-  function broadcastTask(task) {
+  function broadcastTask(task, announce) {
+    let count = 0;
     function bc(win) {
+      count++;
       try {
         win.postMessage({ type: 'CPFRUN_TASK', processo: task.processo, seq: task.seq }, '*');
       } catch (e) {
@@ -140,6 +151,9 @@
       }
     }
     bc(window);
+    if (announce) {
+      log('tarefa', task.processo, '(seq', task.seq + ') anunciada para', count, 'janela(s)/frame(s) desta aba.');
+    }
   }
 
   function reportResult(task, extra) {
@@ -265,6 +279,21 @@
 
     const includeContent = document.querySelector(SEL_INCLUDE_CONTENT);
     const partesCarregadas = includeContent && includeContent.querySelector('table.resultTable');
+
+    // log de diagnóstico toda vez que o "retrato" desta página muda,
+    // para acompanhar a navegação sem inundar o console a cada 500ms.
+    const signature = [
+      location.href,
+      !!document.querySelector(SEL_MENU_BUSCA),
+      !!document.querySelector(SEL_NUM_PROCESSO),
+      pageProcesso,
+      !!document.querySelector(SEL_TAB_PARTES),
+      !!partesCarregadas,
+    ].join('|');
+    if (signature !== lastLoggedSignature) {
+      lastLoggedSignature = signature;
+      log('estado da página mudou ->', signature);
+    }
 
     if (partesCarregadas && processoCorreto) {
       lastReportedSeq = currentTask.seq;
@@ -511,7 +540,7 @@
         currentAssignedTask = task;
 
         stopBroadcast();
-        broadcastTask(task);
+        broadcastTask(task, true);
         broadcastHandle = setInterval(() => broadcastTask(task), BROADCAST_INTERVAL_MS);
 
         timeoutHandle = setTimeout(() => {
