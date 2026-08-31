@@ -1,18 +1,12 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      1.0.3
-// @description  Abre vários processos do Projudi/TJPR em abas simultâneas, entra na aba "Partes e Outros", localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
+// @version      2.0.0
+// @description  Percorre vários processos do Projudi/TJPR, um de cada vez, na mesma aba: entra na aba "Partes e Outros", localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
 // @author       muriloguedes1982
 // @match        *://*.tjpr.jus.br/*
 // @run-at       document-idle
-// @grant        GM_setValue
-// @grant        GM_getValue
-// @grant        GM_deleteValue
-// @grant        GM_addValueChangeListener
-// @grant        GM_removeValueChangeListener
-// @grant        GM_openInTab
-// @grant        GM_notification
+// @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // ==/UserScript==
@@ -26,17 +20,18 @@
  *    inferior direito da tela.
  * 3. Cole na caixa de texto os números únicos dos processos (um por linha,
  *    com ou sem pontuação - o script limpa a formatação sozinho).
- * 4. Ajuste, se quiser, o número de abas simultâneas (padrão 20) e quantas
+ * 4. Ajuste, se quiser, a pausa entre processos (padrão 1,5s) e quantas
  *    imagens por página no PDF final (padrão 2).
- * 5. Clique em "Iniciar". O script vai:
- *       - abrir uma aba em segundo plano para cada processo;
+ * 5. Clique em "Iniciar". O script vai, PARA CADA PROCESSO DA LISTA, UM DE
+ *    CADA VEZ, na própria aba em que você está (sem abrir abas novas):
  *       - localizar o campo de busca, digitar o número e pesquisar;
  *       - clicar na aba "Partes e Outros";
  *       - procurar a parte "A Apurar" / "A APURAR";
  *       - se ela não tiver CPF/CNPJ cadastrado, tirar um print da área com
  *         o número único, classe processual, assuntos e partes, destacando
  *         em vermelho a célula do CPF da parte "A Apurar";
- *       - fechar a aba e reportar o resultado ao painel de controle.
+ *       - reportar o resultado ao painel de controle e seguir para o
+ *         próximo processo da lista.
  * 6. Quando todos os processos forem processados, clique em "Gerar PDF"
  *    (ou aguarde a geração automática) para baixar um único arquivo PDF
  *    com todos os prints das ocorrências sem CPF.
@@ -49,30 +44,27 @@
  *   #informacoesProcessuais). Se o TJPR atualizar o layout do sistema, pode
  *   ser necessário ajustar as constantes no topo do bloco "CONFIGURAÇÃO"
  *   abaixo.
- * - O Projudi é montado com frames/iframes aninhados. Este script roda em
- *   TODAS as janelas/frames da página (é assim que ele consegue preencher o
- *   formulário de busca e clicar na aba de partes, que ficam dentro de um
- *   frame interno) e usa GM_setValue/GM_addValueChangeListener para
- *   conversar entre abas e entre frames (esse mecanismo funciona mesmo que
- *   os frames internos estejam em um subdomínio diferente, como
- *   projudi2.tjpr.jus.br).
- * - Use com responsabilidade: abrir muitas abas ao mesmo tempo gera carga
- *   no servidor do TJPR. Prefira rodar em horários de menor uso e evite
- *   concorrências muito altas se perceber lentidão.
- * - O TJPR passou a exibir o Projudi dentro de um portal (a barra com o
- *   "PDPJ-Br"/"cabecalho-oid.jsp"), então a aba de verdade (topo da janela)
- *   pode não estar mais em uma URL que contenha "/projudi/" - por isso o
- *   @match cobre todo o domínio *.tjpr.jus.br, não só "/projudi/*". Isso é
- *   necessário para que o painel de controle (que só é montado na janela de
- *   topo) consiga aparecer.
+ * - O Projudi é montado com frames/iframes aninhados (às vezes em um
+ *   subdomínio diferente, como projudi2.tjpr.jus.br). Este script roda em
+ *   TODAS as janelas/frames da página e usa postMessage para a janela de
+ *   topo avisar qual processo deve ser pesquisado agora e para o frame que
+ *   encontrar o resultado avisar de volta - isso funciona mesmo entre
+ *   frames de origens diferentes.
+ * - Processamento é SEQUENCIAL (um processo por vez, na mesma aba) para não
+ *   sobrecarregar/derrubar a sessão no servidor do TJPR como acontecia ao
+ *   abrir várias abas simultâneas.
+ * - O TJPR exibe o Projudi dentro de um portal (barra "PDPJ-Br"/
+ *   "cabecalho-oid.jsp"), então a aba de verdade (topo da janela) pode não
+ *   estar em uma URL que contenha "/projudi/" - por isso o @match cobre
+ *   todo o domínio *.tjpr.jus.br. Além disso, essa página de topo costuma
+ *   ser um <frameset> antigo, então o painel é montado em
+ *   document.documentElement (não em document.body).
  */
 
 (function () {
   'use strict';
 
   // ======================= CONFIGURAÇÃO ======================= //
-  const BASE_URL = 'https://projudi.tjpr.jus.br/projudi/';
-
   const SEL_MENU_BUSCA = '#processoBusca';
   const SEL_NUM_PROCESSO = '#numeroProcesso';
   const SEL_BTN_PESQUISAR = '#pesquisar';
@@ -85,9 +77,9 @@
   const NOME_ALVO_REGEX = /A\s*APURAR/i;
   const CPF_VAZIO_REGEX = /n[aã]o\s*cadastrado|^$/i;
 
-  const TASK_TIMEOUT_MS = 90000; // tempo máximo por processo antes de desistir
-  const BROADCAST_INTERVAL_MS = 800; // intervalo de "aviso" entre frames
-  const POLL_INTERVAL_MS = 600; // intervalo de checagem do estado da página
+  const TASK_TIMEOUT_MS = 90000; // tempo máximo por processo antes de desistir e ir para o próximo
+  const BROADCAST_INTERVAL_MS = 700; // intervalo de "aviso" entre frames sobre a tarefa atual
+  const POLL_INTERVAL_MS = 500; // intervalo de checagem do estado da página em cada frame
 
   // ======================= UTILITÁRIOS ======================= //
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -109,63 +101,58 @@
     console.log('[CPF-A-Apurar]', ...args);
   }
 
-  // ======================= PARTE "TRABALHADOR" (roda em toda aba/frame) ======================= //
-  // Cada frame descobre, via URL própria (frame de topo) ou via postMessage
-  // (frames internos), qual processo deve pesquisar nesta aba, e então
-  // avança sozinho por um "estado" simples baseado no que existe no DOM.
+  // ======================= PARTE "TRABALHADOR" (roda em toda janela/frame) ======================= //
+  // A janela de topo mantém a fila de processos e, a cada momento, avisa
+  // (via postMessage) qual é o processo "da vez" para todos os frames da
+  // própria aba. Cada frame verifica o que existe no DOM e avança sozinho
+  // (clicar no menu de busca, preencher e pesquisar, clicar em "Partes e
+  // Outros", extrair o resultado) e reporta de volta para a janela de topo
+  // (também via postMessage) quando termina. Como tudo acontece na MESMA
+  // aba, não é preciso nenhum mecanismo de armazenamento entre abas.
 
-  let assignment = null; // { runId, index, processo }
-  let acted = false;
+  let currentTask = null; // { processo, seq }
+  let lastReportedSeq = null;
 
-  function readAssignmentFromUrl() {
-    try {
-      const params = new URLSearchParams(location.search);
-      const cpfrun = params.get('cpfrun');
-      if (!cpfrun) return null;
-      const sep = cpfrun.lastIndexOf('_');
-      if (sep === -1) return null;
-      const runId = cpfrun.slice(0, sep);
-      const index = parseInt(cpfrun.slice(sep + 1), 10);
-      const list = JSON.parse(GM_getValue('cpfrun_' + runId + '_list', '[]'));
-      const processo = list[index];
-      if (!processo) return null;
-      return { runId, index, processo };
-    } catch (e) {
-      return null;
+  window.addEventListener('message', (ev) => {
+    const d = ev.data;
+    if (!d) return;
+    if (d.type === 'CPFRUN_TASK') {
+      if (!currentTask || currentTask.seq !== d.seq) {
+        currentTask = { processo: d.processo, seq: d.seq };
+      }
     }
-  }
+  });
 
-  function broadcastAssignment(a) {
+  function broadcastTask(task) {
     function bc(win) {
       try {
-        win.postMessage({ type: 'CPFRUN_ASSIGN', runId: a.runId, index: a.index, processo: a.processo }, '*');
+        win.postMessage({ type: 'CPFRUN_TASK', processo: task.processo, seq: task.seq }, '*');
       } catch (e) {
         /* ignore */
       }
       try {
         for (let i = 0; i < win.frames.length; i++) bc(win.frames[i]);
       } catch (e) {
-        /* cross-origin frame collection failed, ignore */
+        /* frame cross-origin, ignore */
       }
     }
     bc(window);
-    setInterval(() => bc(window), BROADCAST_INTERVAL_MS);
   }
 
-  window.addEventListener('message', (ev) => {
-    const d = ev.data;
-    if (d && d.type === 'CPFRUN_ASSIGN' && !assignment) {
-      assignment = { runId: d.runId, index: d.index, processo: d.processo };
+  function reportResult(task, extra) {
+    const payload = Object.assign({ processo: task.processo, seq: task.seq }, extra);
+    try {
+      window.top.postMessage({ type: 'CPFRUN_RESULT', ...payload }, '*');
+    } catch (e) {
+      log('erro ao reportar resultado', e);
     }
-  });
+  }
 
-  function reportResult(extra) {
-    if (!assignment) return;
-    const payload = Object.assign(
-      { processo: assignment.processo, index: assignment.index },
-      extra
-    );
-    GM_setValue('cpfrun_' + assignment.runId + '_result_' + assignment.index, JSON.stringify(payload));
+  function currentPageProcesso() {
+    const el = document.querySelector(SEL_HEADER_TITULO);
+    if (!el) return null;
+    const digits = (el.textContent || '').replace(/\D/g, '');
+    return digits || null;
   }
 
   async function buildScreenshot() {
@@ -200,7 +187,7 @@
     return combined.toDataURL('image/jpeg', 0.82);
   }
 
-  async function extractAndReport() {
+  async function extractAndReport(task) {
     const tables = Array.from(document.querySelectorAll(SEL_RESULT_TABLES));
     let foundRow = null;
     let foundTable = null;
@@ -221,7 +208,7 @@
     }
 
     if (!foundRow) {
-      reportResult({ status: 'NAO_ENCONTRADO' });
+      reportResult(task, { status: 'NAO_ENCONTRADO' });
       return;
     }
 
@@ -234,7 +221,7 @@
     const semCpf = CPF_VAZIO_REGEX.test(cpfText);
 
     if (!semCpf) {
-      reportResult({ status: 'OK_TEM_CPF', cpfText });
+      reportResult(task, { status: 'OK_TEM_CPF', cpfText });
       return;
     }
 
@@ -253,35 +240,42 @@
     cpfCell.setAttribute('style', prevStyle);
 
     if (!imageDataUrl) {
-      reportResult({ status: 'ERRO_SCREENSHOT' });
+      reportResult(task, { status: 'ERRO_SCREENSHOT' });
       return;
     }
 
-    reportResult({ status: 'ALERTA_SEM_CPF', imageDataUrl });
+    reportResult(task, { status: 'ALERTA_SEM_CPF', imageDataUrl });
   }
 
   async function tryAdvance() {
-    if (acted || !assignment) return;
+    if (!currentTask) return;
+    if (lastReportedSeq === currentTask.seq) return; // já tratamos esta tarefa nesta página
+
+    const pageProcesso = currentPageProcesso();
+    const processoCorreto = pageProcesso === currentTask.processo;
 
     const includeContent = document.querySelector(SEL_INCLUDE_CONTENT);
-    if (includeContent && includeContent.querySelector('table.resultTable')) {
-      acted = true;
-      await extractAndReport();
+    const partesCarregadas = includeContent && includeContent.querySelector('table.resultTable');
+
+    if (partesCarregadas && processoCorreto) {
+      lastReportedSeq = currentTask.seq;
+      await extractAndReport(currentTask);
       return;
     }
 
     const tabLink = document.querySelector(SEL_TAB_PARTES);
-    if (tabLink) {
-      acted = true;
+    if (tabLink && processoCorreto) {
       tabLink.click();
       return;
     }
 
+    // se a página mostra um processo diferente do atual (sobra da consulta
+    // anterior) ou nenhum processo, não tenta extrair nem clicar na aba de
+    // partes - precisa primeiro voltar para a busca.
     const numField = document.querySelector(SEL_NUM_PROCESSO);
     const btnPesquisar = document.querySelector(SEL_BTN_PESQUISAR);
     if (numField && btnPesquisar) {
-      acted = true;
-      numField.value = assignment.processo;
+      numField.value = currentTask.processo;
       numField.dispatchEvent(new Event('input', { bubbles: true }));
       numField.dispatchEvent(new Event('change', { bubbles: true }));
       await sleep(150);
@@ -290,18 +284,16 @@
     }
 
     const buscaMenu = document.querySelector(SEL_MENU_BUSCA);
-    if (buscaMenu) {
-      acted = true;
+    if (buscaMenu && !processoCorreto) {
       buscaMenu.click();
       return;
     }
   }
 
   function startWorker() {
-    const interval = setInterval(() => {
+    setInterval(() => {
       tryAdvance().catch((e) => log('erro no avanço de estado', e));
     }, POLL_INTERVAL_MS);
-    setTimeout(() => clearInterval(interval), TASK_TIMEOUT_MS + 5000);
   }
 
   // ======================= PARTE "CONTROLADOR" (painel na aba principal) ======================= //
@@ -364,7 +356,7 @@
       <div class="body" id="cpfrun-body">
         <div>Números do processo (um por linha):</div>
         <textarea id="cpfrun-lista" placeholder="0001421-79.2014.8.16.0077"></textarea>
-        <div class="row"><label>Abas simultâneas</label><input type="number" id="cpfrun-conc" value="20" min="1" max="20"></div>
+        <div class="row"><label>Pausa entre processos (s)</label><input type="number" id="cpfrun-pausa" value="1.5" min="0" max="30" step="0.5"></div>
         <div class="row"><label>Imagens por página no PDF</label><input type="number" id="cpfrun-perpage" value="2" min="1" max="6"></div>
         <div class="row">
           <button class="btn-start" id="cpfrun-start">Iniciar</button>
@@ -412,8 +404,8 @@
         alert('Cole ao menos um número de processo.');
         return;
       }
-      const concurrency = Math.max(1, Math.min(20, parseInt(document.getElementById('cpfrun-conc').value, 10) || 20));
-      state = startBatch(list, concurrency);
+      const pausaMs = Math.max(0, (parseFloat(document.getElementById('cpfrun-pausa').value) || 1.5) * 1000);
+      state = startSequence(list, pausaMs);
     });
 
     document.getElementById('cpfrun-stop').addEventListener('click', () => {
@@ -450,89 +442,82 @@
       document.getElementById('cpfrun-pdf').disabled = alerta === 0;
     }
 
-    function startBatch(list, concurrency) {
-      const runId = Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-      GM_setValue('cpfrun_' + runId + '_list', JSON.stringify(list));
-
+    function startSequence(list, pausaMs) {
       const results = list.map((p) => ({ processo: p, status: 'PENDENTE' }));
       renderStatus(results);
 
-      const openTabs = {};
-      const listeners = {};
-      let nextIndex = 0;
+      let index = 0;
+      let seqCounter = 0;
       let stopped = false;
       let allDone = false;
+      let timeoutHandle = null;
+      let broadcastHandle = null;
+
+      function stopBroadcast() {
+        if (broadcastHandle) {
+          clearInterval(broadcastHandle);
+          broadcastHandle = null;
+        }
+      }
+
+      let currentAssignedTask = null;
+
+      function onMessage(ev) {
+        const d = ev.data;
+        if (!d || d.type !== 'CPFRUN_RESULT') return;
+        if (!currentAssignedTask || d.seq !== currentAssignedTask.seq) return; // resultado de tarefa antiga, ignora
+        finishCurrent(d);
+      }
+      window.addEventListener('message', onMessage);
 
       function launchNext() {
         if (stopped) return;
-        if (nextIndex >= list.length) return;
-        const i = nextIndex++;
-        launch(i);
-      }
-
-      function checkCompletion() {
-        if (stopped || allDone) return;
-        if (nextIndex >= list.length && Object.keys(openTabs).length === 0) {
-          allDone = true;
-          GM_deleteValue('cpfrun_' + runId + '_list');
-          try {
-            GM_notification({ text: 'Verificação de CPF concluída.', title: 'A Apurar - Projudi' });
-          } catch (e) { /* ignore */ }
+        if (index >= list.length) {
+          finishAll();
+          return;
         }
-      }
 
-      function finishSlot(i) {
-        if (listeners[i]) {
-          GM_removeValueChangeListener(listeners[i]);
-          delete listeners[i];
-        }
-        if (openTabs[i]) {
-          try { openTabs[i].close(); } catch (e) { /* ignore */ }
-          delete openTabs[i];
-        }
-        renderStatus(results);
-        if (!stopped) launchNext();
-        checkCompletion();
-      }
-
-      function launch(i) {
-        results[i].status = 'ANDAMENTO';
+        const processo = list[index];
+        results[index].status = 'ANDAMENTO';
         renderStatus(results);
 
-        const key = 'cpfrun_' + runId + '_result_' + i;
-        listeners[i] = GM_addValueChangeListener(key, (name, oldV, newV) => {
-          try {
-            const res = JSON.parse(newV);
-            results[i] = Object.assign(results[i], res);
-          } catch (e) {
-            results[i].status = 'ERRO_SCREENSHOT';
-          }
-          finishSlot(i);
-        });
+        seqCounter++;
+        const task = { processo, seq: seqCounter };
+        currentAssignedTask = task;
 
-        const url = BASE_URL + '?cpfrun=' + runId + '_' + i;
-        const tab = GM_openInTab(url, { active: false, insert: true, setParent: true });
-        openTabs[i] = tab;
+        stopBroadcast();
+        broadcastTask(task);
+        broadcastHandle = setInterval(() => broadcastTask(task), BROADCAST_INTERVAL_MS);
 
-        setTimeout(() => {
-          if (results[i].status === 'ANDAMENTO' || results[i].status === 'PENDENTE') {
-            results[i].status = 'TIMEOUT';
-            finishSlot(i);
-          }
+        timeoutHandle = setTimeout(() => {
+          finishCurrent({ status: 'TIMEOUT', seq: task.seq });
         }, TASK_TIMEOUT_MS);
       }
 
-      // dispara as primeiras N abas com um pequeno intervalo entre elas
-      // para não sobrecarregar o servidor de uma só vez
-      let started = 0;
-      const starter = setInterval(() => {
-        if (stopped || started >= concurrency || nextIndex >= list.length) {
-          clearInterval(starter);
-          return;
+      function finishCurrent(resultData) {
+        if (stopped) return;
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+          timeoutHandle = null;
         }
-        launchNext();
-        started++;
-      }, 350);
+        stopBroadcast();
+
+        results[index] = Object.assign(results[index], resultData);
+        renderStatus(results);
+
+        index++;
+        currentAssignedTask = null;
+
+        setTimeout(launchNext, pausaMs);
+      }
+
+      function finishAll() {
+        allDone = true;
+        window.removeEventListener('message', onMessage);
+        log('sequência concluída.');
+      }
+
+      launchNext();
 
       return {
         results,
@@ -541,10 +526,9 @@
         },
         stop() {
           stopped = true;
-          Object.keys(openTabs).forEach((i) => {
-            try { openTabs[i].close(); } catch (e) { /* ignore */ }
-          });
-          Object.keys(listeners).forEach((i) => GM_removeValueChangeListener(listeners[i]));
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          stopBroadcast();
+          window.removeEventListener('message', onMessage);
         },
       };
     }
@@ -613,21 +597,12 @@
 
   log('script carregado em', location.href, '| topo?', window.top === window);
 
-  const fromUrl = readAssignmentFromUrl();
-
-  if (window.top === window && !fromUrl) {
-    // aba "normal" (não foi aberta pelo script para processar um processo):
-    // monta o painel de controle.
+  if (window.top === window) {
     try {
       initControllerUI();
     } catch (e) {
       log('ERRO ao montar o painel de controle:', e);
     }
-  }
-
-  if (fromUrl) {
-    assignment = fromUrl;
-    broadcastAssignment(assignment);
   }
 
   // toda janela/frame (inclusive os internos do Projudi) fica escutando e,
