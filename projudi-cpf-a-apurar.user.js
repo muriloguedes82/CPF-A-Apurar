@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      5.0.0
+// @version      5.1.0
 // @description  Para cada processo de uma lista, busca os dados diretamente do Projudi/TJPR por requisição HTTP (sem depender de clicar em nada dentro dos frames do sistema), localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, registra o número único, classe processual, assuntos e partes num relatório em PDF, com o CPF em falta destacado em vermelho.
 // @author       muriloguedes1982
 // @match        *://projudi.tjpr.jus.br/*
@@ -114,7 +114,19 @@
   }
 
   function textoLimpo(el) {
-    return el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : '';
+    if (!el) return '';
+    // clona e remove <script>/<style> internos antes de ler o texto - o
+    // Projudi às vezes coloca um <script> (ex.: inicialização de tooltip)
+    // dentro do próprio elemento, e textContent incluiria esse código.
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll('script, style').forEach((n) => n.remove());
+    return (clone.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function extrairNumeroProcesso(doc) {
+    const bruto = textoLimpo(doc.querySelector(SEL_HEADER_TITULO));
+    const m = bruto.match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/);
+    return m ? 'Processo: ' + m[0] : bruto;
   }
 
   function log(...args) {
@@ -188,7 +200,7 @@
   // ======================= EXTRAÇÃO DOS DADOS ======================= //
 
   function extrairDadosCompletos(doc) {
-    const numeroTexto = textoLimpo(doc.querySelector(SEL_HEADER_TITULO));
+    const numeroTexto = extrairNumeroProcesso(doc);
     const classeTexto = textoLimpo(doc.querySelector('.definitionClasseProcessual'));
     const assuntoTexto = textoLimpo(doc.querySelector('.definitionAssuntoPrincipal'));
 
@@ -204,15 +216,16 @@
       let cpfIdx = headerCells.findIndex((th) => /CPF\s*\/?\s*CNPJ/i.test(th.textContent || ''));
       if (cpfIdx === -1) cpfIdx = 3;
 
+      // só nos interessa a linha da parte "A Apurar" - as demais partes do
+      // processo não entram no relatório.
       const linhas = [];
       table.querySelectorAll('tbody tr').forEach((row) => {
         const nameCell = row.children[1];
         const nome = textoLimpo(nameCell);
-        if (!nome) return;
+        if (!nome || !NOME_ALVO_REGEX.test(nome)) return;
         const rg = textoLimpo(row.children[2]);
         const cpf = textoLimpo(row.children[cpfIdx]);
-        const alvo = NOME_ALVO_REGEX.test(nome);
-        linhas.push({ nome, rg, cpf, destacar: alvo && CPF_VAZIO_REGEX.test(cpf) });
+        linhas.push({ nome, rg, cpf, destacar: CPF_VAZIO_REGEX.test(cpf) });
       });
 
       if (linhas.length) secoes.push({ titulo, linhas });
