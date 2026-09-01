@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      4.0.0
+// @version      4.1.0
 // @description  Para cada processo de uma lista, busca os dados diretamente do Projudi/TJPR por requisição HTTP (sem depender de clicar em nada dentro dos frames do sistema), localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
 // @author       muriloguedes1982
 // @match        *://projudi.tjpr.jus.br/*
@@ -216,15 +216,23 @@
     const headerInfo = doc.querySelector(SEL_HEADER_INFO_TABLE);
     const partes = doc.querySelector(SEL_INCLUDE_CONTENT);
 
-    if (headerTitulo) canvases.push(await html2canvas(headerTitulo, opts));
-    if (headerInfo) canvases.push(await html2canvas(headerInfo, opts));
-    if (partes) canvases.push(await html2canvas(partes, opts));
+    if (headerTitulo) canvases.push(['titulo', await html2canvas(headerTitulo, opts)]);
+    if (headerInfo) canvases.push(['infoProcessuais', await html2canvas(headerInfo, opts)]);
+    if (partes) canvases.push(['partes', await html2canvas(partes, opts)]);
 
-    if (!canvases.length) return null;
+    canvases.forEach(([nome, c]) => log('screenshot', nome, '->', c.width + 'x' + c.height));
 
-    const width = Math.max(...canvases.map((c) => c.width));
+    // descarta pedaços com tamanho zero (elemento existia no DOM mas não
+    // tinha layout renderizado - ex.: ícones que falharam por CORS não
+    // deveriam zerar a seção inteira, mas por segurança não deixamos isso
+    // quebrar o desenho da imagem combinada).
+    const validCanvases = canvases.filter(([, c]) => c.width > 0 && c.height > 0).map(([, c]) => c);
+
+    if (!validCanvases.length) return null;
+
+    const width = Math.max(...validCanvases.map((c) => c.width));
     const gap = 10;
-    const totalHeight = canvases.reduce((s, c) => s + c.height + gap, 0);
+    const totalHeight = validCanvases.reduce((s, c) => s + c.height + gap, 0);
 
     const combined = document.createElement('canvas');
     combined.width = width;
@@ -234,7 +242,7 @@
     ctx.fillRect(0, 0, width, totalHeight);
 
     let y = 0;
-    for (const c of canvases) {
+    for (const c of validCanvases) {
       ctx.drawImage(c, 0, y);
       y += c.height + gap;
     }
