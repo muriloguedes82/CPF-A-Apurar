@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      5.1.0
-// @description  Para cada processo de uma lista, busca os dados diretamente do Projudi/TJPR por requisição HTTP (sem depender de clicar em nada dentro dos frames do sistema), localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, registra o número único, classe processual, assuntos e partes num relatório em PDF, com o CPF em falta destacado em vermelho.
+// @version      5.2.0
+// @description  Para cada processo de uma lista, busca os dados diretamente do Projudi/TJPR por requisição HTTP (sem depender de clicar em nada dentro dos frames do sistema), localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, registra o número único, classe processual, assuntos e a parte "A Apurar" num relatório em PDF, com o CPF em falta destacado em vermelho e o RG (quando informado em formato numérico) destacado em amarelo.
 // @author       muriloguedes1982
 // @match        *://projudi.tjpr.jus.br/*
 // @match        *://*.tjpr.jus.br/*
@@ -88,6 +88,8 @@
 
   const NOME_ALVO_REGEX = /A\s*APURAR/i;
   const CPF_VAZIO_REGEX = /n[aã]o\s*cadastrado|^$/i;
+  const RG_VAZIO_REGEX = /n[aã]o\s*(informado|cadastrado)|^$/i;
+  const RG_NUMERICO_REGEX = /\d/; // RG considerado "informado em formato numérico" se tiver ao menos um dígito
 
   const REQUEST_TIMEOUT_MS = 30000;
 
@@ -225,7 +227,14 @@
         if (!nome || !NOME_ALVO_REGEX.test(nome)) return;
         const rg = textoLimpo(row.children[2]);
         const cpf = textoLimpo(row.children[cpfIdx]);
-        linhas.push({ nome, rg, cpf, destacar: CPF_VAZIO_REGEX.test(cpf) });
+        const rgInformadoNumerico = !RG_VAZIO_REGEX.test(rg) && RG_NUMERICO_REGEX.test(rg);
+        linhas.push({
+          nome,
+          rg,
+          cpf,
+          destacarCpf: CPF_VAZIO_REGEX.test(cpf),
+          destacarRg: rgInformadoNumerico,
+        });
       });
 
       if (linhas.length) secoes.push({ titulo, linhas });
@@ -549,11 +558,20 @@
             garantirEspaco(alturaLinha + 2);
 
             doc.text(nomeLinhas, margin, y);
-            doc.text(linha.rg || '-', margin + colNome, y);
+            const rgX = margin + colNome;
+            doc.text(linha.rg || '-', rgX, y);
             const cpfX = margin + colNome + colRg;
             doc.text(linha.cpf || '-', cpfX, y);
 
-            if (linha.destacar) {
+            if (linha.destacarRg) {
+              doc.setDrawColor(255, 193, 7);
+              doc.setLineWidth(0.5);
+              doc.rect(rgX - 1.5, y - 3.3, colRg - 1, alturaLinha);
+              doc.setDrawColor(0);
+              doc.setLineWidth(0.15);
+            }
+
+            if (linha.destacarCpf) {
               doc.setDrawColor(220, 0, 0);
               doc.setLineWidth(0.5);
               doc.rect(cpfX - 1.5, y - 3.3, colCpf - 1, alturaLinha);
