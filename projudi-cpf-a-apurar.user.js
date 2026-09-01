@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      4.1.0
+// @version      4.2.0
 // @description  Para cada processo de uma lista, busca os dados diretamente do Projudi/TJPR por requisição HTTP (sem depender de clicar em nada dentro dos frames do sistema), localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
 // @author       muriloguedes1982
 // @match        *://projudi.tjpr.jus.br/*
@@ -141,20 +141,39 @@
     return html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
   }
 
+  const HTML2CANVAS_CDN_URL = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+
   function renderHtmlInIframe(html) {
     return new Promise((resolve) => {
       const iframe = document.createElement('iframe');
       iframe.style.cssText = 'position:fixed; left:-10000px; top:0; width:1200px; height:2200px; border:0; background:#fff;';
       (document.body || document.documentElement).appendChild(iframe);
       const doc = iframe.contentDocument;
+      // carrega uma cópia própria do html2canvas DENTRO do iframe: a versão
+      // carregada na aba principal (via @require) não renderiza direito
+      // elementos de um "document" diferente do seu - dava canvas 0x0.
       const htmlComBase = stripScripts(html).replace(
         /<head(\s[^>]*)?>/i,
-        (m) => m + `<base href="${BASE_HOST}/">`
+        (m) => m + `<base href="${BASE_HOST}/">` + `<script src="${HTML2CANVAS_CDN_URL}"></script>`
       );
       doc.open();
       doc.write(htmlComBase);
       doc.close();
-      setTimeout(() => resolve(iframe), RENDER_WAIT_MS);
+
+      const startedAt = Date.now();
+      const MAX_WAIT_MS = 15000;
+      (function waitHtml2Canvas() {
+        if (iframe.contentWindow && iframe.contentWindow.html2canvas) {
+          setTimeout(() => resolve(iframe), RENDER_WAIT_MS);
+          return;
+        }
+        if (Date.now() - startedAt > MAX_WAIT_MS) {
+          log('aviso: html2canvas não carregou dentro do iframe a tempo, seguindo mesmo assim');
+          resolve(iframe);
+          return;
+        }
+        setTimeout(waitHtml2Canvas, 150);
+      })();
     });
   }
 
@@ -209,16 +228,23 @@
 
   // ======================= EXTRAÇÃO E SCREENSHOT ======================= //
 
-  async function buildScreenshot(doc) {
+  async function buildScreenshot(iframe) {
+    const doc = iframe.contentDocument;
+    const render = iframe.contentWindow && iframe.contentWindow.html2canvas;
+    if (!render) {
+      log('erro: html2canvas não disponível dentro do iframe');
+      return null;
+    }
+
     const opts = { backgroundColor: '#ffffff', useCORS: true, allowTaint: true, scale: 1.3, logging: false };
     const canvases = [];
     const headerTitulo = doc.querySelector(SEL_HEADER_TITULO);
     const headerInfo = doc.querySelector(SEL_HEADER_INFO_TABLE);
     const partes = doc.querySelector(SEL_INCLUDE_CONTENT);
 
-    if (headerTitulo) canvases.push(['titulo', await html2canvas(headerTitulo, opts)]);
-    if (headerInfo) canvases.push(['infoProcessuais', await html2canvas(headerInfo, opts)]);
-    if (partes) canvases.push(['partes', await html2canvas(partes, opts)]);
+    if (headerTitulo) canvases.push(['titulo', await render(headerTitulo, opts)]);
+    if (headerInfo) canvases.push(['infoProcessuais', await render(headerInfo, opts)]);
+    if (partes) canvases.push(['partes', await render(partes, opts)]);
 
     canvases.forEach(([nome, c]) => log('screenshot', nome, '->', c.width + 'x' + c.height));
 
@@ -249,7 +275,8 @@
     return combined.toDataURL('image/jpeg', 0.82);
   }
 
-  async function extractFromDoc(doc) {
+  async function extractFromIframe(iframe) {
+    const doc = iframe.contentDocument;
     const tables = Array.from(doc.querySelectorAll(SEL_RESULT_TABLES));
     let foundRow = null;
     let foundTable = null;
@@ -291,7 +318,7 @@
 
     let imageDataUrl = null;
     try {
-      imageDataUrl = await buildScreenshot(doc);
+      imageDataUrl = await buildScreenshot(iframe);
     } catch (e) {
       log('erro ao gerar screenshot', e);
     }
@@ -309,7 +336,7 @@
     let iframe = null;
     try {
       iframe = await buscarProcesso(numero);
-      const resultado = await extractFromDoc(iframe.contentDocument);
+      const resultado = await extractFromIframe(iframe);
       return resultado;
     } catch (e) {
       log('erro processando', numero, e);
