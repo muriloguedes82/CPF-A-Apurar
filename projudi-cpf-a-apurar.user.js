@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      4.2.0
+// @version      4.3.0
 // @description  Para cada processo de uma lista, busca os dados diretamente do Projudi/TJPR por requisição HTTP (sem depender de clicar em nada dentro dos frames do sistema), localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
 // @author       muriloguedes1982
 // @match        *://projudi.tjpr.jus.br/*
@@ -152,9 +152,17 @@
       // carrega uma cópia própria do html2canvas DENTRO do iframe: a versão
       // carregada na aba principal (via @require) não renderiza direito
       // elementos de um "document" diferente do seu - dava canvas 0x0.
-      const htmlComBase = stripScripts(html).replace(
+      const semScripts = stripScripts(html);
+      const htmlComBase = semScripts.replace(
         /<head(\s[^>]*)?>/i,
         (m) => m + `<base href="${BASE_HOST}/">` + `<script src="${HTML2CANVAS_CDN_URL}"></script>`
+      );
+      log(
+        'diagnóstico iframe -> htmlOriginal=' + html.length + ' chars',
+        '| semScripts=' + semScripts.length + ' chars',
+        '| baseInserida=' + (htmlComBase.includes('<base href=') ),
+        '| htmlContémIncludeContent=' + html.includes('id="includeContent"'),
+        '| htmlContémBarraTitulo=' + html.includes('id="barraTituloStatusProcessual"')
       );
       doc.open();
       doc.write(htmlComBase);
@@ -241,6 +249,27 @@
     const headerTitulo = doc.querySelector(SEL_HEADER_TITULO);
     const headerInfo = doc.querySelector(SEL_HEADER_INFO_TABLE);
     const partes = doc.querySelector(SEL_INCLUDE_CONTENT);
+
+    function describe(nome, el) {
+      if (!el) return log('diagnóstico', nome, '-> elemento não encontrado');
+      const r = el.getBoundingClientRect();
+      const cs = doc.defaultView.getComputedStyle(el);
+      log(
+        'diagnóstico', nome,
+        '-> rect=' + Math.round(r.width) + 'x' + Math.round(r.height),
+        '| offset=' + el.offsetWidth + 'x' + el.offsetHeight,
+        '| display=' + cs.display,
+        '| visibility=' + cs.visibility
+      );
+    }
+    log(
+      'diagnóstico documento -> readyState=' + doc.readyState,
+      '| bodyRect=' + (doc.body ? Math.round(doc.body.getBoundingClientRect().width) + 'x' + Math.round(doc.body.getBoundingClientRect().height) : 'sem body'),
+      '| htmlLength=' + doc.documentElement.outerHTML.length
+    );
+    describe('titulo', headerTitulo);
+    describe('infoProcessuais', headerInfo);
+    describe('partes', partes);
 
     if (headerTitulo) canvases.push(['titulo', await render(headerTitulo, opts)]);
     if (headerInfo) canvases.push(['infoProcessuais', await render(headerInfo, opts)]);
