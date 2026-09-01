@@ -1,19 +1,18 @@
 // ==UserScript==
 // @name         Projudi - Verificação em Lote de CPF da parte "A Apurar"
 // @namespace    cpf-a-apurar.local
-// @version      3.2.0
-// @description  Percorre vários processos do Projudi/TJPR, um de cada vez, na mesma aba: entra na aba "Partes e Outros", localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
+// @version      4.0.0
+// @description  Para cada processo de uma lista, busca os dados diretamente do Projudi/TJPR por requisição HTTP (sem depender de clicar em nada dentro dos frames do sistema), localiza a parte "A Apurar" e, quando ela não tiver CPF cadastrado, gera um print (número único, classe, assuntos e partes) com a coluna do CPF destacada em vermelho. Ao final, junta tudo em um único PDF.
 // @author       muriloguedes1982
-// @match        *://*.tjpr.jus.br/*
 // @match        *://projudi.tjpr.jus.br/*
-// @match        *://projudi2.tjpr.jus.br/*
-// @match        *://projudi3.tjpr.jus.br/*
-// @match        *://projudi4.tjpr.jus.br/*
-// @run-at       document-start
-// @grant        GM_setValue
-// @grant        GM_getValue
-// @grant        GM_addValueChangeListener
-// @grant        GM_removeValueChangeListener
+// @match        *://*.tjpr.jus.br/*
+// @run-at       document-idle
+// @grant        GM_xmlhttpRequest
+// @connect      projudi2.tjpr.jus.br
+// @connect      projudi3.tjpr.jus.br
+// @connect      projudi4.tjpr.jus.br
+// @connect      projudi.tjpr.jus.br
+// @connect      tjpr.jus.br
 // @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // ==/UserScript==
@@ -29,61 +28,61 @@
  *    com ou sem pontuação - o script limpa a formatação sozinho).
  * 4. Ajuste, se quiser, a pausa entre processos (padrão 1,5s) e quantas
  *    imagens por página no PDF final (padrão 2).
- * 5. Clique em "Iniciar". O script vai, PARA CADA PROCESSO DA LISTA, UM DE
- *    CADA VEZ, na própria aba em que você está (sem abrir abas novas):
- *       - localizar o campo de busca, digitar o número e pesquisar;
- *       - clicar na aba "Partes e Outros";
+ * 5. Clique em "Iniciar". Na PRIMEIRA vez, o navegador/Tampermonkey deve
+ *    perguntar se autoriza este script a acessar projudi2.tjpr.jus.br (ou
+ *    similar) - autorize (marque "sempre permitir" para não perguntar de
+ *    novo). O script vai, PARA CADA PROCESSO DA LISTA, um de cada vez:
+ *       - buscar o processo diretamente por requisição HTTP, usando o
+ *         mesmo cookie de sessão do seu login (sem abrir aba nem clicar
+ *         em nada na tela);
+ *       - pedir a página do processo já com a aba "Partes e Outros";
  *       - procurar a parte "A Apurar" / "A APURAR";
- *       - se ela não tiver CPF/CNPJ cadastrado, tirar um print da área com
- *         o número único, classe processual, assuntos e partes, destacando
- *         em vermelho a célula do CPF da parte "A Apurar";
- *       - reportar o resultado ao painel de controle e seguir para o
- *         próximo processo da lista.
+ *       - se ela não tiver CPF/CNPJ cadastrado, montar um print da área
+ *         com o número único, classe processual, assuntos e partes,
+ *         destacando em vermelho a célula do CPF da parte "A Apurar";
+ *       - reportar o resultado no painel e seguir para o próximo processo.
  * 6. Quando todos os processos forem processados, clique em "Gerar PDF"
  *    (ou aguarde a geração automática) para baixar um único arquivo PDF
  *    com todos os prints das ocorrências sem CPF.
  *
- * OBSERVAÇÕES IMPORTANTES
- * ------------------------
- * - Este script depende de IDs/seletores específicos das páginas do Projudi
- *   (#processoBusca, #numeroProcesso, #pesquisar, #tabItemprefix2,
- *   #includeContent, table.resultTable, #barraTituloStatusProcessual,
- *   #informacoesProcessuais). Se o TJPR atualizar o layout do sistema, pode
- *   ser necessário ajustar as constantes no topo do bloco "CONFIGURAÇÃO"
- *   abaixo.
- * - O Projudi é montado com frames/iframes aninhados (topo em
- *   projudi.tjpr.jus.br > frame "área de atuação" em projudi2.tjpr.jus.br
- *   > iframe "userMainFrame" com a "mesa" e o formulário de busca, mesma
- *   origem do frame pai). Este script roda em TODAS as janelas/frames da
- *   página e usa o armazenamento do Tampermonkey (GM_setValue/
- *   GM_addValueChangeListener) para a janela de topo avisar qual processo
- *   deve ser pesquisado agora e para quem encontrar o resultado avisar de
- *   volta - isso funciona instantaneamente em qualquer frame, não importa
- *   a origem/subdomínio ou quando ele carregar. Além disso, sempre que
- *   consegue rodar em algum frame, o script também tenta agir diretamente
- *   em qualquer <iframe>/<frame> filho de MESMA ORIGEM (via
- *   contentDocument) - isso cobre o caso em que o Tampermonkey não
- *   conseguiu (ou demorou a) injetar um script separado num frame filho
- *   específico.
- * - Processamento é SEQUENCIAL (um processo por vez, na mesma aba) para não
- *   sobrecarregar/derrubar a sessão no servidor do TJPR como acontecia ao
- *   abrir várias abas simultâneas.
- * - O TJPR exibe o Projudi dentro de um portal (barra "PDPJ-Br"/
- *   "cabecalho-oid.jsp"), então a aba de verdade (topo da janela) pode não
- *   estar em uma URL que contenha "/projudi/" - por isso o @match cobre
- *   todo o domínio *.tjpr.jus.br. Além disso, essa página de topo costuma
- *   ser um <frameset> antigo, então o painel é montado em
- *   document.documentElement (não em document.body).
+ * POR QUE ESSA ABORDAGEM (E NÃO CLICAR NA TELA)
+ * ------------------------------------------------
+ * Tentamos primeiro automatizar clicando nos elementos da tela (preencher o
+ * campo de busca, clicar em "Partes e Outros" etc.), mas o Tampermonkey se
+ * mostrou incapaz de injetar um script dentro do frame específico onde o
+ * Projudi coloca o formulário de busca (projudi2.tjpr.jus.br) - confirmado
+ * pelo log interno do Tampermonkey, que mostrava a navegação sendo detectada
+ * mas o script nunca sendo executado ali, mesmo com todas as permissões
+ * corretas. Em vez de depender disso, o script agora busca os dados
+ * diretamente via requisição HTTP (usando GM_xmlhttpRequest, que reaproveita
+ * o cookie de sessão do seu navegador automaticamente), replicando
+ * exatamente o que o formulário de busca e o clique na aba "Partes e
+ * Outros" fazem por trás dos panos:
+ *   1) POST para processo/buscaProcesso.do?actionType=pesquisaSimples com o
+ *      número do processo - isso identifica o ID interno do processo.
+ *   2) POST para visualizacaoProcesso.do?actionType=visualizar com esse ID
+ *      e selectedIcon=tabPartes - isso já devolve a página do processo com
+ *      a aba "Partes e Outros" carregada.
+ * O HTML recebido é escrito dentro de um <iframe> oculto criado pelo
+ * próprio script (não precisa de nenhuma injeção separada ali, porque esse
+ * iframe pertence ao próprio script) só para o html2canvas conseguir
+ * renderizar e tirar o print; a extração de texto (nome da parte, CPF etc.)
+ * não depende de renderização nenhuma.
+ * - Se o TJPR atualizar o layout/URLs do sistema, pode ser necessário
+ *   ajustar as constantes no bloco "CONFIGURAÇÃO" abaixo.
+ * - O domínio usado nas requisições (BASE_HOST) foi identificado como
+ *   projudi2.tjpr.jus.br nesta sessão; se no seu caso for outro
+ *   (projudi3, projudi4...), ajuste a constante BASE_HOST.
  */
 
 (function () {
   'use strict';
 
   // ======================= CONFIGURAÇÃO ======================= //
-  const SEL_MENU_BUSCA = '#processoBusca';
-  const SEL_NUM_PROCESSO = '#numeroProcesso';
-  const SEL_BTN_PESQUISAR = '#pesquisar';
-  const SEL_TAB_PARTES = '#tabItemprefix2 a';
+  const BASE_HOST = 'https://projudi2.tjpr.jus.br';
+  const SEARCH_URL = BASE_HOST + '/projudi/processo/buscaProcesso.do?actionType=pesquisaSimples';
+  const VIEW_URL = BASE_HOST + '/projudi/visualizacaoProcesso.do?actionType=visualizar';
+
   const SEL_INCLUDE_CONTENT = '#includeContent';
   const SEL_HEADER_TITULO = '#barraTituloStatusProcessual';
   const SEL_HEADER_INFO_TABLE = '#informacoesProcessuais';
@@ -92,8 +91,8 @@
   const NOME_ALVO_REGEX = /A\s*APURAR/i;
   const CPF_VAZIO_REGEX = /n[aã]o\s*cadastrado|^$/i;
 
-  const TASK_TIMEOUT_MS = 90000; // tempo máximo por processo antes de desistir e ir para o próximo
-  const POLL_INTERVAL_MS = 500; // intervalo de checagem do estado da página em cada frame
+  const REQUEST_TIMEOUT_MS = 30000;
+  const RENDER_WAIT_MS = 900; // tempo de espera para o iframe oculto carregar CSS/imagens antes do print
 
   // ======================= UTILITÁRIOS ======================= //
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -115,82 +114,100 @@
     console.log('[CPF-A-Apurar]', ...args);
   }
 
-  // ======================= PARTE "TRABALHADOR" (roda em toda janela/frame) ======================= //
-  // A janela de topo mantém a fila de processos e, a cada momento, grava
-  // (via GM_setValue) qual é o processo "da vez". Como o armazenamento do
-  // Tampermonkey NÃO é isolado por frame/origem (ao contrário de
-  // postMessage, que depende de alcançar o frame certo na árvore, algo que
-  // se mostrou frágil no Projudi - o formulário de busca mora num frame que
-  // demora a carregar, tipo usuario/mesaAnalista.do), TODOS os frames da
-  // aba enxergam o mesmo valor instantaneamente via
-  // GM_addValueChangeListener, não importa em qual frame/origem estejam.
-  // Cada frame verifica o que existe no DOM e avança sozinho (clicar no
-  // menu de busca, preencher e pesquisar, clicar em "Partes e Outros",
-  // extrair o resultado) e reporta o resultado de volta do mesmo jeito.
-
-  const GM_KEY_TASK = 'cpfrun_task';
-  const GM_KEY_RESULT = 'cpfrun_result';
-
-  let currentTask = null; // { processo, seq }
-
-  function adoptTask(t) {
-    if (!t || !t.seq) return;
-    if (!currentTask || currentTask.seq !== t.seq) {
-      currentTask = t;
-      log('tarefa recebida:', t.processo, '(seq', t.seq + ') | URL desta página:', location.href);
-      log(
-        'diagnóstico desta página ->',
-        'processoBusca:', !!document.querySelector(SEL_MENU_BUSCA),
-        '| numeroProcesso:', !!document.querySelector(SEL_NUM_PROCESSO),
-        '| pesquisar:', !!document.querySelector(SEL_BTN_PESQUISAR),
-        '| abaPartes:', !!document.querySelector(SEL_TAB_PARTES),
-        '| includeContent:', !!document.querySelector(SEL_INCLUDE_CONTENT)
+  function gmRequest(opts) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest(
+        Object.assign(
+          {
+            timeout: REQUEST_TIMEOUT_MS,
+            onload: (res) => resolve(res),
+            onerror: (err) => reject(new Error('erro de rede: ' + (err && err.error))),
+            ontimeout: () => reject(new Error('tempo esgotado na requisição')),
+          },
+          opts
+        )
       );
+    });
+  }
+
+  // ======================= BUSCA DO PROCESSO (via HTTP) ======================= //
+
+  function extractProcessoId(html) {
+    const m = html.match(/name=["']id["']\s+value=["'](\d+)["']/);
+    return m ? m[1] : null;
+  }
+
+  function stripScripts(html) {
+    return html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  }
+
+  function renderHtmlInIframe(html) {
+    return new Promise((resolve) => {
+      const iframe = document.createElement('iframe');
+      iframe.style.cssText = 'position:fixed; left:-10000px; top:0; width:1200px; height:2200px; border:0; background:#fff;';
+      (document.body || document.documentElement).appendChild(iframe);
+      const doc = iframe.contentDocument;
+      const htmlComBase = stripScripts(html).replace(
+        /<head(\s[^>]*)?>/i,
+        (m) => m + `<base href="${BASE_HOST}/">`
+      );
+      doc.open();
+      doc.write(htmlComBase);
+      doc.close();
+      setTimeout(() => resolve(iframe), RENDER_WAIT_MS);
+    });
+  }
+
+  async function buscarProcesso(numero) {
+    const body =
+      'page=1&flagNumeroUnico=true&flagNumeroFisicoAntigo=false&numeroProcesso=' + encodeURIComponent(numero);
+    const searchRes = await gmRequest({
+      method: 'POST',
+      url: SEARCH_URL,
+      data: body,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+    });
+
+    let id = extractProcessoId(searchRes.responseText);
+    if (!id) {
+      // pode já ser a própria página do processo (encaminhamento interno) sem
+      // ter o padrão esperado, ou pode ser uma lista de resultados/erro.
+      throw new Error('não foi possível identificar um único processo para esse número');
     }
-  }
 
-  // pega a tarefa atual assim que este frame carrega (caso já exista uma
-  // tarefa em andamento quando este documento apareceu) ...
-  try {
-    const existing = GM_getValue(GM_KEY_TASK, null);
-    if (existing) adoptTask(JSON.parse(existing));
-  } catch (e) {
-    /* ignore */
-  }
-  // ... e continua ouvindo por novas tarefas a qualquer momento.
-  GM_addValueChangeListener(GM_KEY_TASK, (name, oldV, newV) => {
-    try {
-      adoptTask(JSON.parse(newV));
-    } catch (e) {
-      /* ignore */
+    // reproduz os campos ocultos de paginação/ordenação que o formulário
+    // real da página envia (valores padrão observados), para reduzir o
+    // risco do servidor se comportar de forma diferente por falta deles.
+    const viewBody = [
+      'id=' + encodeURIComponent(id),
+      'selectedIcon=tabPartes',
+      'promovidasPageSize=2147483547',
+      'promovidasPageNumber=1',
+      'promovidasSortColumn=' + encodeURIComponent('parte.nome'),
+      'promovidasSortOrder=asc',
+      'vitimasPageSize=2147483547',
+      'vitimasPageNumber=1',
+      'vitimasSortColumn=' + encodeURIComponent('parte.nome'),
+      'vitimasSortOrder=asc',
+    ].join('&');
+
+    const viewRes = await gmRequest({
+      method: 'POST',
+      url: VIEW_URL,
+      data: viewBody,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+    });
+
+    if (!/id=["']?/.test(viewRes.responseText) && !viewRes.responseText.includes(SEL_HEADER_TITULO.slice(1))) {
+      // checagem frouxa apenas para logging; não interrompe o fluxo.
+      log('aviso: resposta da visualização do processo', numero, 'parece incomum, seguindo mesmo assim');
     }
-  });
 
-  function reportResult(task, extra) {
-    const payload = Object.assign({ processo: task.processo, seq: task.seq }, extra);
-    GM_setValue(GM_KEY_RESULT, JSON.stringify(payload));
+    const iframe = await renderHtmlInIframe(viewRes.responseText);
+    return iframe;
   }
 
-  // Estado de progresso é rastreado POR DOCUMENTO (não globalmente), porque
-  // um único script instanciado num frame pode alcançar e mexer em vários
-  // documentos de mesma origem (o seu próprio + filhos same-origin, veja
-  // tryAdvanceRecursive). Cada documento tem seu próprio "quanto já avancei".
-  const docState = new WeakMap();
-  function getDocState(doc) {
-    let st = docState.get(doc);
-    if (!st) {
-      st = { acted: false, actedForSeq: null, lastReportedSeq: null, lastLoggedSignature: null };
-      docState.set(doc, st);
-    }
-    return st;
-  }
-
-  function currentPageProcesso(doc) {
-    const el = doc.querySelector(SEL_HEADER_TITULO);
-    if (!el) return null;
-    const digits = (el.textContent || '').replace(/\D/g, '');
-    return digits || null;
-  }
+  // ======================= EXTRAÇÃO E SCREENSHOT ======================= //
 
   async function buildScreenshot(doc) {
     const opts = { backgroundColor: '#ffffff', useCORS: true, allowTaint: true, scale: 1.3, logging: false };
@@ -224,7 +241,7 @@
     return combined.toDataURL('image/jpeg', 0.82);
   }
 
-  async function extractAndReport(doc, task) {
+  async function extractFromDoc(doc) {
     const tables = Array.from(doc.querySelectorAll(SEL_RESULT_TABLES));
     let foundRow = null;
     let foundTable = null;
@@ -245,8 +262,7 @@
     }
 
     if (!foundRow) {
-      reportResult(task, { status: 'NAO_ENCONTRADO' });
-      return;
+      return { status: 'NAO_ENCONTRADO' };
     }
 
     const headerCells = Array.from(foundTable.querySelectorAll('thead th'));
@@ -258,14 +274,12 @@
     const semCpf = CPF_VAZIO_REGEX.test(cpfText);
 
     if (!semCpf) {
-      reportResult(task, { status: 'OK_TEM_CPF', cpfText });
-      return;
+      return { status: 'OK_TEM_CPF', cpfText };
     }
 
     const prevStyle = cpfCell.getAttribute('style') || '';
     cpfCell.style.boxShadow = 'inset 0 0 0 4px #ff0000, 0 0 0 2px #ff0000';
     cpfCell.style.backgroundColor = 'rgba(255,0,0,0.15)';
-    await sleep(80);
 
     let imageDataUrl = null;
     try {
@@ -277,135 +291,27 @@
     cpfCell.setAttribute('style', prevStyle);
 
     if (!imageDataUrl) {
-      reportResult(task, { status: 'ERRO_SCREENSHOT' });
-      return;
+      return { status: 'ERRO_SCREENSHOT' };
     }
 
-    reportResult(task, { status: 'ALERTA_SEM_CPF', imageDataUrl });
+    return { status: 'ALERTA_SEM_CPF', imageDataUrl };
   }
 
-  async function tryAdvanceOn(doc) {
-    if (!currentTask) return;
-    const st = getDocState(doc);
-    if (st.lastReportedSeq === currentTask.seq) return; // já tratamos esta tarefa neste documento
-
-    // uma tarefa nova chegou neste mesmo documento (não navegou) - libera a
-    // trava de "já cliquei" para poder agir de novo.
-    if (st.acted && st.actedForSeq !== currentTask.seq) {
-      st.acted = false;
-    }
-
-    const pageProcesso = currentPageProcesso(doc);
-    const processoCorreto = pageProcesso === currentTask.processo;
-
-    const includeContent = doc.querySelector(SEL_INCLUDE_CONTENT);
-    const partesCarregadas = includeContent && includeContent.querySelector('table.resultTable');
-
-    // log de diagnóstico toda vez que o "retrato" deste documento muda,
-    // para acompanhar a navegação sem inundar o console a cada 500ms.
-    const signature = [
-      doc.URL,
-      !!doc.querySelector(SEL_MENU_BUSCA),
-      !!doc.querySelector(SEL_NUM_PROCESSO),
-      pageProcesso,
-      !!doc.querySelector(SEL_TAB_PARTES),
-      !!partesCarregadas,
-    ].join('|');
-    if (signature !== st.lastLoggedSignature) {
-      st.lastLoggedSignature = signature;
-      log('estado da página mudou ->', signature);
-    }
-
-    if (partesCarregadas && processoCorreto) {
-      st.lastReportedSeq = currentTask.seq;
-      log('partes carregadas para', currentTask.processo, '- extraindo...');
-      await extractAndReport(doc, currentTask);
-      return;
-    }
-
-    // Já clicamos em algo para esta tarefa e ainda não vimos o resultado -
-    // não clica de novo, só espera (evita cliques repetidos a cada 500ms
-    // enquanto a navegação/carregamento da página ainda está em curso,
-    // que pode levar vários segundos no Projudi).
-    if (st.acted) return;
-
-    const tabLink = doc.querySelector(SEL_TAB_PARTES);
-    if (tabLink && processoCorreto) {
-      st.acted = true;
-      st.actedForSeq = currentTask.seq;
-      log('clicando em "Partes e Outros" para', currentTask.processo, '| doc:', doc.URL);
-      tabLink.click();
-      return;
-    }
-
-    // se a página mostra um processo diferente do atual (sobra da consulta
-    // anterior) ou nenhum processo, não tenta extrair nem clicar na aba de
-    // partes - precisa primeiro voltar para a busca.
-    const numField = doc.querySelector(SEL_NUM_PROCESSO);
-    const btnPesquisar = doc.querySelector(SEL_BTN_PESQUISAR);
-    if (numField && btnPesquisar) {
-      st.acted = true;
-      st.actedForSeq = currentTask.seq;
-      log('preenchendo busca com', currentTask.processo, '| doc:', doc.URL);
-      numField.value = currentTask.processo;
-      numField.dispatchEvent(new Event('input', { bubbles: true }));
-      numField.dispatchEvent(new Event('change', { bubbles: true }));
-      await sleep(150);
-      btnPesquisar.click();
-      return;
-    }
-
-    const buscaMenu = doc.querySelector(SEL_MENU_BUSCA);
-    if (buscaMenu && !processoCorreto) {
-      st.acted = true;
-      st.actedForSeq = currentTask.seq;
-      log('clicando no menu de busca de processo | doc:', doc.URL);
-      buscaMenu.click();
-      return;
-    }
-  }
-
-  // Tenta agir no documento deste frame E, recursivamente, em qualquer
-  // <iframe>/<frame> filho que seja da MESMA ORIGEM (contentDocument
-  // acessível sem erro de cross-origin) - assim, um único frame em que o
-  // Tampermonkey conseguiu injetar o script consegue alcançar e operar
-  // frames filhos de mesma origem mesmo que o Tampermonkey não tenha
-  // (ou ainda não tenha) injetado um script separado ali dentro. Frames
-  // filhos de origem DIFERENTE precisam ter o próprio script injetado
-  // neles (o que também acontece na maioria das vezes) para se cuidarem
-  // sozinhos.
-  async function tryAdvanceRecursive(doc) {
+  async function processarUm(numero) {
+    let iframe = null;
     try {
-      await tryAdvanceOn(doc);
+      iframe = await buscarProcesso(numero);
+      const resultado = await extractFromDoc(iframe.contentDocument);
+      return resultado;
     } catch (e) {
-      log('erro no avanço de estado', e);
-    }
-    let frames;
-    try {
-      frames = doc.querySelectorAll('iframe, frame');
-    } catch (e) {
-      return;
-    }
-    for (const f of frames) {
-      let childDoc = null;
-      try {
-        childDoc = f.contentDocument;
-      } catch (e) {
-        childDoc = null;
-      }
-      if (childDoc) {
-        await tryAdvanceRecursive(childDoc);
-      }
+      log('erro processando', numero, e);
+      return { status: 'ERRO', mensagem: String((e && e.message) || e) };
+    } finally {
+      if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
     }
   }
 
-  function startWorker() {
-    setInterval(() => {
-      tryAdvanceRecursive(document);
-    }, POLL_INTERVAL_MS);
-  }
-
-  // ======================= PARTE "CONTROLADOR" (painel na aba principal) ======================= //
+  // ======================= PAINEL DE CONTROLE ======================= //
 
   function initControllerUI() {
     if (document.getElementById('cpfrun-panel')) return;
@@ -413,21 +319,16 @@
     // Projudi serve uma página antiga baseada em <frameset>. Nesse caso,
     // document.body (por spec) aponta para o próprio elemento <frameset>,
     // e elementos "extras" anexados dentro dele normalmente NÃO são
-    // renderizados pelo navegador (o frameset só sabe desenhar frame/
-    // frameset/noframes). Por isso, quando body for um frameset, montamos
-    // o painel direto em document.documentElement (a tag <html>), que
-    // renderiza normalmente um elemento com position:fixed por cima de tudo.
+    // renderizados pelo navegador. Por isso, quando body for um frameset,
+    // montamos o painel direto em document.documentElement (a tag <html>).
     let mountPoint = document.body;
     if (!mountPoint || mountPoint.tagName === 'FRAMESET') {
       mountPoint = document.documentElement;
     }
     if (!mountPoint) {
-      log('painel: DOM ainda não está pronto, tentando novamente em 500ms...');
       setTimeout(initControllerUI, 500);
       return;
     }
-
-    log('painel: montando painel de controle em', mountPoint.tagName);
 
     const style = document.createElement('style');
     style.textContent = `
@@ -477,7 +378,7 @@
       </div>
     `;
     mountPoint.appendChild(panel);
-    log('painel: painel de controle adicionado com sucesso.');
+    log('painel de controle montado.');
 
     // arrastar o painel
     (function makeDraggable() {
@@ -539,7 +440,7 @@
           case 'OK_TEM_CPF': tagClass = 'tag-ok'; tagText = 'possui CPF'; ok++; break;
           case 'ALERTA_SEM_CPF': tagClass = 'tag-alerta'; tagText = 'SEM CPF'; alerta++; break;
           case 'NAO_ENCONTRADO': tagClass = 'tag-naoenc'; tagText = 'sem "A Apurar"'; naoenc++; break;
-          case 'TIMEOUT': tagClass = 'tag-erro'; tagText = 'tempo esgotado'; erro++; break;
+          case 'ERRO': tagClass = 'tag-erro'; tagText = 'erro: ' + (item.mensagem || '?'); erro++; break;
           case 'ERRO_SCREENSHOT': tagClass = 'tag-erro'; tagText = 'erro no print'; erro++; break;
           default: pend++;
         }
@@ -547,7 +448,7 @@
         ul.appendChild(li);
       });
       document.getElementById('cpfrun-resumo').textContent =
-        `Total: ${list.length} | Sem CPF: ${alerta} | OK: ${ok} | Sem parte: ${naoenc} | Erro/timeout: ${erro} | Pendentes: ${pend}`;
+        `Total: ${list.length} | Sem CPF: ${alerta} | OK: ${ok} | Sem parte: ${naoenc} | Erro: ${erro} | Pendentes: ${pend}`;
       document.getElementById('cpfrun-pdf').disabled = alerta === 0;
     }
 
@@ -555,70 +456,25 @@
       const results = list.map((p) => ({ processo: p, status: 'PENDENTE' }));
       renderStatus(results);
 
-      const runId = Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-      let index = 0;
-      let n = 0;
       let stopped = false;
       let allDone = false;
-      let timeoutHandle = null;
-      let currentAssignedTask = null;
 
-      const resultListenerId = GM_addValueChangeListener(GM_KEY_RESULT, (name, oldV, newV) => {
-        try {
-          const d = JSON.parse(newV);
-          if (!currentAssignedTask || d.seq !== currentAssignedTask.seq) return; // resultado de tarefa antiga, ignora
-          finishCurrent(d);
-        } catch (e) {
-          log('erro ao interpretar resultado', e);
+      (async () => {
+        for (let i = 0; i < list.length; i++) {
+          if (stopped) break;
+          results[i].status = 'ANDAMENTO';
+          renderStatus(results);
+
+          const r = await processarUm(list[i]);
+          results[i] = Object.assign(results[i], r);
+          renderStatus(results);
+
+          if (stopped) break;
+          if (i < list.length - 1) await sleep(pausaMs);
         }
-      });
-
-      function launchNext() {
-        if (stopped) return;
-        if (index >= list.length) {
-          finishAll();
-          return;
-        }
-
-        const processo = list[index];
-        results[index].status = 'ANDAMENTO';
-        renderStatus(results);
-
-        n++;
-        const task = { processo, seq: runId + ':' + n };
-        currentAssignedTask = task;
-
-        GM_setValue(GM_KEY_TASK, JSON.stringify(task));
-        log('tarefa', task.processo, '(seq', task.seq + ') publicada.');
-
-        timeoutHandle = setTimeout(() => {
-          finishCurrent({ status: 'TIMEOUT', seq: task.seq });
-        }, TASK_TIMEOUT_MS);
-      }
-
-      function finishCurrent(resultData) {
-        if (stopped) return;
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-          timeoutHandle = null;
-        }
-
-        results[index] = Object.assign(results[index], resultData);
-        renderStatus(results);
-
-        index++;
-        currentAssignedTask = null;
-
-        setTimeout(launchNext, pausaMs);
-      }
-
-      function finishAll() {
         allDone = true;
-        GM_removeValueChangeListener(resultListenerId);
         log('sequência concluída.');
-      }
-
-      launchNext();
+      })();
 
       return {
         results,
@@ -627,8 +483,6 @@
         },
         stop() {
           stopped = true;
-          if (timeoutHandle) clearTimeout(timeoutHandle);
-          GM_removeValueChangeListener(resultListenerId);
         },
       };
     }
@@ -695,17 +549,12 @@
 
   // ======================= INICIALIZAÇÃO ======================= //
 
-  log('script carregado em', location.href, '| topo?', window.top === window);
-
   if (window.top === window) {
+    log('script carregado em', location.href);
     try {
       initControllerUI();
     } catch (e) {
       log('ERRO ao montar o painel de controle:', e);
     }
   }
-
-  // toda janela/frame (inclusive os internos do Projudi) fica escutando e,
-  // assim que souber qual processo deve tratar, tenta avançar sozinha.
-  startWorker();
 })();
